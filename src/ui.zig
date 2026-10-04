@@ -373,7 +373,7 @@ pub fn init() void {
     clearScr();
     if (main.config.nc_tty) {
         const tty = std.c.fopen("/dev/tty", "r+");
-        if (tty == null) die("Error opening /dev/tty: {s}.\n", .{@tagName(std.posix.errno(-1))});
+        if (tty == null) die("Error opening /dev/tty: {t}.\n", .{std.posix.errno(-1)});
         const term = c.newterm(null, @ptrCast(tty), @ptrCast(tty));
         if (term == null) die("Error initializing ncurses.\n", .{});
         _ = c.set_term(term);
@@ -389,7 +389,7 @@ pub fn init() void {
     _ = c.start_color();
     _ = c.use_default_colors();
     for (styles, 0..) |s, i| _ = c.init_pair(@as(i16, @intCast(i + 1)), s.style().fg, s.style().bg);
-    _ = c.bkgd(@intCast(c.COLOR_PAIR(@intFromEnum(Style.default) + 1)));
+    _ = c.bkgd(@intCast(c.COLOR_PAIR(@backingInt(Style.default) + 1)));
     inited = true;
 }
 
@@ -405,7 +405,7 @@ pub fn deinit() void {
 }
 
 pub fn style(s: Style) void {
-    _ = c.attr_set(styles[@intFromEnum(s)].style().attr, @intFromEnum(s) + 1, null);
+    _ = c.attr_set(styles[@backingInt(s)].style().attr, @backingInt(s) + 1, null);
 }
 
 pub fn move(y: u32, x: u32) void {
@@ -422,7 +422,7 @@ pub fn addstr(s: [:0]const u8) void {
 // Not to be used for strings that may end up >256 bytes.
 pub fn addprint(comptime fmt: []const u8, args: anytype) void {
     var buf: [256:0]u8 = undefined;
-    const s = std.fmt.bufPrintSentinel(&buf, fmt, args, 0) catch unreachable;
+    const s = std.mem.printSentinel(&buf, fmt, args, 0) catch unreachable;
     addstr(s);
 }
 
@@ -487,7 +487,7 @@ pub const FmtSize = struct {
 
     fn testEql(self: FmtSize, exp: []const u8) !void {
         var buf: [10]u8 = undefined;
-        try std.testing.expectEqualStrings(exp, try std.fmt.bufPrint(&buf, "{s}{s}", .{ self.num(), self.unit }));
+        try std.testing.expectEqualStrings(exp, try std.mem.print(&buf, "{s}{s}", .{ self.num(), self.unit }));
     }
 };
 
@@ -543,7 +543,7 @@ pub fn addsize(bg: Bg, v: u64) void {
 // (Assuming thousands_sep takes a single column)
 pub fn addnum(bg: Bg, v: u64) void {
     var buf: [32]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable;
+    const s = std.mem.print(&buf, "{d}", .{v}) catch unreachable;
     var f: [64:0]u8 = undefined;
     var i: usize = 0;
     for (s, 0..) |digit, n| {
@@ -682,7 +682,7 @@ pub fn getch(io: std.Io, block: bool) i32 {
         }
         return ch;
     }
-    die("Error reading keyboard input, assuming TTY has been lost.\n(Potentially nonsensical error message: {s})\n", .{@tagName(std.posix.errno(-1))});
+    die("Error reading keyboard input, assuming TTY has been lost.\n(Potentially nonsensical error message: {t})\n", .{std.posix.errno(-1)});
 }
 
 fn waitInput(io: std.Io) void {
@@ -710,7 +710,7 @@ pub fn runCmd(io: std.Io, cmd: []const []const u8, cwd: ?[]const u8, env: *std.p
         .cwd = if (cwd) |p| .{ .path = p } else .inherit,
         .environ_map = env,
     }) catch |e| {
-        const out = std.fmt.allocPrint(main.allocator, "Error running command: {s}\n\nPress enter to continue.\n", .{ui.errorString(e)}) catch @panic("Failed to print error");
+        const out = main.allocator.print("Error running command: {s}\n\nPress enter to continue.\n", .{ui.errorString(e)}) catch @panic("Failed to print error");
         defer main.allocator.free(out);
         std.Io.File.stdout().writeStreamingAll(io, out) catch @panic("Failed to write error");
         waitInput(io);
@@ -727,11 +727,11 @@ pub fn runCmd(io: std.Io, cmd: []const []const u8, cwd: ?[]const u8, env: *std.p
     };
     const v = switch (term) {
         .exited => |v| v,
-        .signal, .stopped => |s| @intFromEnum(s),
+        .signal, .stopped => |s| @backingInt(s),
         .unknown => |v| v,
     };
     if (term != .exited or (reporterr and v != 0)) {
-        const out = std.fmt.allocPrint(main.allocator, "\nCommand returned with {s} code {}.\nPress enter to continue.\n", .{ n, v }) catch @panic("Failed to print error message");
+        const out = main.allocator.print("\nCommand returned with {s} code {}.\nPress enter to continue.\n", .{ n, v }) catch @panic("Failed to print error message");
         defer main.allocator.free(out);
         std.Io.File.stdout().writeStreamingAll(io, out) catch @panic("Failed to write error message");
         waitInput(io);

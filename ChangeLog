@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 # SPDX-License-Identifier: MIT
 
+2.12 - 2026-10-04
+	- Now requires Zig 0.17
+
 2.11 - 2026-10-04
 	- Now requires Zig 0.16
 

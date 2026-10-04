@@ -552,7 +552,7 @@ fn item(io: std.Io, ctx: *Ctx, parent: ?*sink.Dir, dev: u64) void {
         ctx.sink.setDir(io, parent);
         dir.unref(io, ctx.sink);
     } else {
-        if (@intFromEnum(ctx.stat.etype) < 0)
+        if (@backingInt(ctx.stat.etype) < 0)
             parent.?.addSpecial(io, ctx.sink, name, ctx.stat.etype)
         else
             parent.?.addStat(io, ctx.sink, name, &ctx.stat);

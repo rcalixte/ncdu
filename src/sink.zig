@@ -76,7 +76,7 @@ pub const Dir = struct {
     };
 
     pub fn addSpecial(d: *Dir, io: std.Io, t: *Thread, name: []const u8, sp: model.EType) void {
-        std.debug.assert(@intFromEnum(sp) < 0); // >=0 aren't "special"
+        std.debug.assert(@backingInt(sp) < 0); // >=0 aren't "special"
         _ = t.files_seen.fetchAdd(1, .monotonic);
         switch (d.out) {
             .mem => |*m| m.addSpecial(io, &t.sink.mem, name, sp),
@@ -329,7 +329,7 @@ fn drawConsole(io: std.Io) void {
         }
     }
 
-    stderr.writeStreamingAll(io, std.fmt.bufPrint(&buf, "{d}\n", .{wr.end}) catch @panic("failed to write to stderr")) catch {};
+    stderr.writeStreamingAll(io, std.mem.print(&buf, "{d}\n", .{wr.end}) catch @panic("failed to write to stderr")) catch {};
 }
 
 fn drawProgress(io: std.Io) void {

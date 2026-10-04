@@ -35,12 +35,12 @@ fn isKernfs(dir: std.Io.Dir) bool {
     return iskern;
 }
 
-fn clamp(comptime T: type, comptime field: anytype, x: anytype) std.meta.fieldInfo(T, field).type {
-    return util.castClamp(std.meta.fieldInfo(T, field).type, x);
+fn clamp(comptime T: type, comptime field: anytype, x: anytype) @FieldType(T, @tagName(field)) {
+    return util.castClamp(@FieldType(T, @tagName(field)), x);
 }
 
-fn truncate(comptime T: type, comptime field: anytype, x: anytype) std.meta.fieldInfo(T, field).type {
-    return util.castTruncate(std.meta.fieldInfo(T, field).type, x);
+fn truncate(comptime T: type, comptime field: anytype, x: anytype) @FieldType(T, @tagName(field)) {
+    return util.castTruncate(@FieldType(T, @tagName(field)), x);
 }
 
 pub fn statAt(parent: std.Io.Dir, name: [:0]const u8, follow: bool, symlink: ?*bool) !sink.Stat {
@@ -60,10 +60,10 @@ pub fn statAt(parent: std.Io.Dir, name: [:0]const u8, follow: bool, symlink: ?*b
         }
     } else if (std.c.fstatat(parent.handle, name, &stat, if (follow) 0 else std.c.AT.SYMLINK_NOFOLLOW) != 0) {
         return switch (std.c._errno().*) {
-            @intFromEnum(std.c.E.NOENT) => error.FileNotFound,
-            @intFromEnum(std.c.E.NAMETOOLONG) => error.NameTooLong,
-            @intFromEnum(std.c.E.NOMEM) => error.OutOfMemory,
-            @intFromEnum(std.c.E.ACCES) => error.AccessDenied,
+            @backingInt(std.c.E.NOENT) => error.FileNotFound,
+            @backingInt(std.c.E.NAMETOOLONG) => error.NameTooLong,
+            @backingInt(std.c.E.NOMEM) => error.OutOfMemory,
+            @backingInt(std.c.E.ACCES) => error.AccessDenied,
             else => error.Unexpected,
         };
     }

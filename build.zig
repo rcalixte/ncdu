@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const pie = b.option(bool, "pie", "Build with PIE support (by default: target-dependant)");
-    const strip = b.option(bool, "strip", "Strip debugging info") orelse (optimize != .Debug);
+    const strip = b.option(bool, "strip", "Strip debugging info") orelse (optimize != .debug);
 
     const main_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -70,8 +70,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args|
-        run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);

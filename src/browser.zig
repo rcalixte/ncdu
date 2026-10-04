@@ -553,13 +553,13 @@ const info = struct {
             if (ext.pack.hasuid) {
                 ui.addstr("  UID: ");
                 ui.style(.default);
-                ui.addstr(std.fmt.bufPrintSentinel(&buf, "{d:<6}", .{ext.uid}, 0) catch unreachable);
+                ui.addstr(std.mem.printSentinel(&buf, "{d:<6}", .{ext.uid}, 0) catch unreachable);
                 ui.style(.bold);
             }
             if (ext.pack.hasgid) {
                 ui.addstr(" GID: ");
                 ui.style(.default);
-                ui.addstr(std.fmt.bufPrintSentinel(&buf, "{d:<6}", .{ext.gid}, 0) catch unreachable);
+                ui.addstr(std.mem.printSentinel(&buf, "{d:<6}", .{ext.gid}, 0) catch unreachable);
             }
         } else {
             ui.addstr("Type: ");
@@ -608,7 +608,7 @@ const info = struct {
             ui.addstr("  Inode: ");
             ui.style(.default);
             var buf: [32]u8 = undefined;
-            ui.addstr(std.fmt.bufPrintSentinel(&buf, "{}", .{l.ino}, 0) catch unreachable);
+            ui.addstr(std.mem.printSentinel(&buf, "{}", .{l.ino}, 0) catch unreachable);
             row.* += 1;
         }
     }

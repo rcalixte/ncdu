@@ -49,7 +49,7 @@ pub const ItemKey = enum(u5) {
 
 // Pessimistic upper bound on the encoded size of an item, excluding the name field.
 // 2 bytes for map start/end, 11 per field (2 for the key, 9 for a full u64).
-const MAX_ITEM_LEN = 2 + 11 * @typeInfo(ItemKey).@"enum".fields.len;
+const MAX_ITEM_LEN = 2 + 11 * @typeInfo(ItemKey).@"enum".field_names.len;
 
 pub const CborMajor = enum(u3) { pos, neg, bytes, text, array, map, tag, simple };
 
@@ -68,7 +68,7 @@ inline fn blockHeader(id: u4, len: u28) [4]u8 {
 }
 
 inline fn cborByte(major: CborMajor, arg: u5) u8 {
-    return (@as(u8, @intFromEnum(major)) << 5) | arg;
+    return (@as(u8, @backingInt(major)) << 5) | arg;
 }
 
 // (Uncompressed) data block size.
@@ -186,7 +186,7 @@ pub const Thread = struct {
     }
 
     fn itemKey(t: *Thread, key: ItemKey) void {
-        t.cborHead(.pos, @intFromEnum(key));
+        t.cborHead(.pos, @backingInt(key));
     }
 
     fn itemRef(t: *Thread, key: ItemKey, ref: ?u64) void {
@@ -209,10 +209,10 @@ pub const Thread = struct {
         t.itemref = (@as(u64, t.block_num) << 24) | t.off;
         t.cborIndef(.map);
         t.itemKey(.type);
-        if (@intFromEnum(itype) >= 0)
-            t.cborHead(.pos, @intCast(@intFromEnum(itype)))
+        if (@backingInt(itype) >= 0)
+            t.cborHead(.pos, @intCast(@backingInt(itype)))
         else
-            t.cborHead(.neg, @intCast(-1 - @intFromEnum(itype)));
+            t.cborHead(.neg, @intCast(-1 - @backingInt(itype)));
         t.itemKey(.name);
         t.cborHead(.bytes, name.len);
         @memcpy(t.buf[t.off..][0..name.len], name);

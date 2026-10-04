@@ -77,7 +77,7 @@ fn deleteCmd(io: std.Io, environ_map: *std.process.Environ.Map, path: [:0]const 
         // Since we're passing the path as an environment variable and go through
         // the shell anyway, we can refer to the variable and avoid error-prone
         // shell escaping.
-        const cmd = std.fmt.allocPrint(main.allocator, "{s} \"$NCDU_DELETE_PATH\"", .{main.config.delete_command}) catch unreachable;
+        const cmd = main.allocator.print("{s} \"$NCDU_DELETE_PATH\"", .{main.config.delete_command}) catch unreachable;
         defer main.allocator.free(cmd);
         ui.runCmd(io, &.{ "/bin/sh", "-c", cmd }, null, environ_map, true);
     }

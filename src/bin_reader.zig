@@ -122,7 +122,7 @@ const CborReader = struct {
         if (r.buf.len < 1) die();
         var v = CborVal{
             .rd = r,
-            .major = @enumFromInt(r.buf[0] >> 5),
+            .major = @fromBackingInt(@intCast(r.buf[0] >> 5)),
             .indef = false,
             .arg = 0,
         };
@@ -343,7 +343,7 @@ const ItemParser = struct {
     fn next(r: *ItemParser) ?Field {
         while (r.key()) |k| {
             if (k.major == .pos and k.arg <= std.math.maxInt(@typeInfo(ItemKey).@"enum".tag_type)) return .{
-                .key = @enumFromInt(k.arg),
+                .key = @fromBackingInt(@intCast(k.arg)),
                 .val = r.r.next(),
             } else {
                 k.skip();
@@ -440,7 +440,7 @@ const Import = struct {
             ctx.fields.prev = prev;
         } else {
             const p = parent orelse die();
-            if (@intFromEnum(ctx.stat.etype) < 0)
+            if (@backingInt(ctx.stat.etype) < 0)
                 p.addSpecial(io, ctx.sink, ctx.fields.name, ctx.stat.etype)
             else
                 p.addStat(io, ctx.sink, ctx.fields.name, &ctx.stat);
