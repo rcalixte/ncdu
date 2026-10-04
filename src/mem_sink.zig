@@ -6,7 +6,6 @@ const main = @import("main.zig");
 const model = @import("model.zig");
 const sink = @import("sink.zig");
 
-
 pub const global = struct {
     pub var root: ?*model.Dir = null;
     pub var stats: bool = true; // calculate aggregate directory stats
@@ -17,19 +16,19 @@ pub const Thread = struct {
     arena: std.heap.ArenaAllocator = std.heap.ArenaAllocator.init(std.heap.page_allocator),
 };
 
-pub fn statToEntry(stat: *const sink.Stat, e: *model.Entry, parent: *model.Dir) void {
+pub fn statToEntry(io: std.Io, stat: *const sink.Stat, e: *model.Entry, parent: *model.Dir) void {
     e.pack.blocks = stat.blocks;
     e.size = stat.size;
     if (e.dir()) |d| {
         d.parent = parent;
-        d.pack.dev = model.devices.getId(stat.dev);
+        d.pack.dev = model.devices.getId(io, stat.dev);
     }
     if (e.link()) |l| {
         l.parent = parent;
         l.ino = stat.ino;
         l.pack.nlink = stat.nlink;
-        model.inodes.lock.lock();
-        defer model.inodes.lock.unlock();
+        model.inodes.lock.lock(io) catch {};
+        defer model.inodes.lock.unlock(io);
         l.addLink();
     }
     if (e.ext()) |ext| ext.* = stat.ext;
@@ -49,7 +48,7 @@ pub const Dir = struct {
     items: u32 = 0,
     mtime: u64 = 0,
     suberr: bool = false,
-    lock: std.Thread.Mutex = .{},
+    lock: std.Io.Mutex = .init,
 
     const Map = std.HashMap(*model.Entry, void, HashContext, 80);
 
@@ -90,7 +89,7 @@ pub const Dir = struct {
         return self;
     }
 
-    fn getEntry(self: *Dir, t: *Thread, etype: model.EType, isext: bool, name: []const u8) *model.Entry {
+    fn getEntry(self: *Dir, io: std.Io, t: *Thread, etype: model.EType, isext: bool, name: []const u8) *model.Entry {
         if (self.entries.getKeyAdapted(name, HashContextAdapted{})) |e| {
             // XXX: In-place conversion may be possible in some cases.
             if (e.pack.etype.base() == etype.base() and (!isext or e.pack.isext)) {
@@ -100,19 +99,19 @@ pub const Dir = struct {
                 return e;
             }
         }
-        const e = model.Entry.create(t.arena.allocator(), etype, isext, name);
+        const e = model.Entry.create(t.arena.allocator(), io, etype, isext, name);
         e.next.ptr = self.dir.sub.ptr;
         self.dir.sub.ptr = e;
         return e;
     }
 
-    pub fn addSpecial(self: *Dir, t: *Thread, name: []const u8, st: model.EType) void {
+    pub fn addSpecial(self: *Dir, io: std.Io, t: *Thread, name: []const u8, st: model.EType) void {
         self.dir.items += 1;
         if (st == .err) self.dir.pack.suberr = true;
-        _ = self.getEntry(t, st, false, name);
+        _ = self.getEntry(io, t, st, false, name);
     }
 
-    pub fn addStat(self: *Dir, t: *Thread, name: []const u8, stat: *const sink.Stat) *model.Entry {
+    pub fn addStat(self: *Dir, io: std.Io, t: *Thread, name: []const u8, stat: *const sink.Stat) *model.Entry {
         if (global.stats) {
             self.dir.items +|= 1;
             if (stat.etype != .link) {
@@ -124,26 +123,28 @@ pub const Dir = struct {
             }
         }
 
-        const e = self.getEntry(t, stat.etype, main.config.extended and !stat.ext.isEmpty(), name);
-        statToEntry(stat, e, self.dir);
+        const e = self.getEntry(io, t, stat.etype, main.config.extended and !stat.ext.isEmpty(), name);
+        statToEntry(io, stat, e, self.dir);
         return e;
     }
 
-    pub fn addDir(self: *Dir, t: *Thread, name: []const u8, stat: *const sink.Stat) Dir {
-        return init(self.addStat(t, name, stat).dir().?);
+    pub fn addDir(self: *Dir, io: std.Io, t: *Thread, name: []const u8, stat: *const sink.Stat) Dir {
+        return init(self.addStat(io, t, name, stat).dir().?);
     }
 
     pub fn setReadError(self: *Dir) void {
         self.dir.pack.err = true;
     }
 
-    pub fn final(self: *Dir, parent: ?*Dir) void {
+    pub fn final(self: *Dir, io: std.Io, parent: ?*Dir) void {
         // Remove entries we've not seen
         if (self.entries.count() > 0) {
             var it = &self.dir.sub.ptr;
             while (it.*) |e| {
-                if (self.entries.getKey(e) == e) it.* = e.next.ptr
-                else it = &e.next.ptr;
+                if (self.entries.getKey(e) == e)
+                    it.* = e.next.ptr
+                else
+                    it = &e.next.ptr;
             }
         }
         self.entries.deinit();
@@ -161,8 +162,8 @@ pub const Dir = struct {
 
         // Add own counts to parent
         if (parent) |p| {
-            p.lock.lock();
-            defer p.lock.unlock();
+            p.lock.lock(io) catch {};
+            defer p.lock.unlock(io);
             p.blocks +|= self.dir.entry.pack.blocks - self.own_blocks;
             p.bytes +|= self.dir.entry.size - self.own_bytes;
             p.items +|= self.dir.items;
@@ -174,13 +175,13 @@ pub const Dir = struct {
     }
 };
 
-pub fn createRoot(path: []const u8, stat: *const sink.Stat) Dir {
+pub fn createRoot(io: std.Io, path: []const u8, stat: *const sink.Stat) Dir {
     const p = global.root orelse blk: {
-        model.root = model.Entry.create(main.allocator, .dir, main.config.extended and !stat.ext.isEmpty(), path).dir().?;
+        model.root = model.Entry.create(main.allocator, io, .dir, main.config.extended and !stat.ext.isEmpty(), path).dir().?;
         break :blk model.root;
     };
     sink.global.state = .zeroing;
-    if (p.items > 10_000) main.handleEvent(false, true);
+    if (p.items > 10_000) main.handleEvent(io, false, true);
     // Do the zeroStats() here, after the "root" entry has been
     // stat'ed and opened, so that a fatal error on refresh won't
     // zero-out the requested directory.
@@ -188,16 +189,16 @@ pub fn createRoot(path: []const u8, stat: *const sink.Stat) Dir {
     sink.global.state = .running;
     p.entry.pack.blocks = stat.blocks;
     p.entry.size = stat.size;
-    p.pack.dev = model.devices.getId(stat.dev);
+    p.pack.dev = model.devices.getId(io, stat.dev);
     if (p.entry.ext()) |e| e.* = stat.ext;
     return Dir.init(p);
 }
 
-pub fn done() void {
+pub fn done(io: std.Io) void {
     if (!global.stats) return;
 
     sink.global.state = .hlcnt;
-    main.handleEvent(false, true);
+    main.handleEvent(io, false, true);
     const dir = global.root orelse model.root;
     var it: ?*model.Dir = dir;
     while (it) |p| : (it = p.parent) {
@@ -208,5 +209,5 @@ pub fn done() void {
             p.items +|= dir.items + 1;
         }
     }
-    model.inodes.addAllStats();
+    model.inodes.addAllStats(io);
 }

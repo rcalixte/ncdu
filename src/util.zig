@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("c");
 
 // Cast any integer type to the target type, clamping the value to the supported maximum if necessary.
 pub fn castClamp(comptime T: type, x: anytype) T {
@@ -20,7 +20,7 @@ pub fn castClamp(comptime T: type, x: anytype) T {
 pub fn castTruncate(comptime T: type, x: anytype) T {
     const Ti = @typeInfo(T).int;
     const Xi = @typeInfo(@TypeOf(x)).int;
-    const nx: std.meta.Int(Ti.signedness, Xi.bits) = @bitCast(x);
+    const nx: @Int(Ti.signedness, Xi.bits) = @bitCast(x);
     return if (Xi.bits > Ti.bits) @truncate(nx) else nx;
 }
 
@@ -35,7 +35,7 @@ pub fn blocksToSize(b: u64) u64 {
 pub fn arrayListBufZ(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator) [:0]const u8 {
     buf.append(alloc, 0) catch unreachable;
     defer buf.items.len -= 1;
-    return buf.items[0..buf.items.len-1:0];
+    return buf.items[0 .. buf.items.len - 1 :0];
 }
 
 // Format an integer as right-aligned '###.#'.
@@ -68,7 +68,6 @@ test "fmt5dec" {
     try eq("999.9", &fmt5dec(9999));
 }
 
-
 // Straightforward Zig port of strnatcmp() from https://github.com/sourcefrog/natsort/
 // (Requiring nul-terminated strings is ugly, but we've got them anyway and it does simplify the code)
 pub fn strnatcmp(a: [:0]const u8, b: [:0]const u8) std.math.Order {
@@ -94,8 +93,10 @@ pub fn strnatcmp(a: [:0]const u8, b: [:0]const u8) std.math.Order {
                 var bias = std.math.Order.eq;
                 while (true) {
                     if (!isDigit(a[ai]) and !isDigit(b[bi])) {
-                        if (bias != .eq or (a[ai] == 0 and b[bi] == 0)) return bias
-                        else break;
+                        if (bias != .eq or (a[ai] == 0 and b[bi] == 0))
+                            return bias
+                        else
+                            break;
                     }
                     if (!isDigit(a[ai])) return .lt;
                     if (!isDigit(b[bi])) return .gt;
@@ -168,66 +169,44 @@ test "strnatcmp" {
     for (0..w.len) |i| {
         try eq(strnatcmp(w[i], w[i]), .eq);
         for (0..i) |j| try eq(strnatcmp(w[i], w[j]), .gt);
-        for (i+1..w.len) |j| try eq(strnatcmp(w[i], w[j]), .lt);
+        for (i + 1..w.len) |j| try eq(strnatcmp(w[i], w[j]), .lt);
     }
 }
 
-
-pub fn expanduser(path: []const u8, alloc: std.mem.Allocator) ![:0]u8 {
-    if (path.len == 0 or path[0] != '~') return alloc.dupeZ(u8, path);
+pub fn expandUser(alloc: std.mem.Allocator, environ: std.process.Environ, path: []const u8) ![:0]u8 {
+    if (path.len == 0 or path[0] != '~') return alloc.dupeSentinel(u8, path, 0);
 
     const len = std.mem.indexOfScalar(u8, path, '/') orelse path.len;
     const home_raw = blk: {
         const pwd = pwd: {
             if (len == 1) {
-                if (std.posix.getenvZ("HOME")) |p| break :blk p;
-                break :pwd c.getpwuid(c.getuid());
+                if (environ.getPosix("HOME")) |p| break :blk p;
+                break :pwd std.c.getpwuid(std.c.getuid());
             } else {
-                const name = try alloc.dupeZ(u8, path[1..len]);
+                const name = try alloc.dupeSentinel(u8, path[1..len], 0);
                 defer alloc.free(name);
-                break :pwd c.getpwnam(name.ptr);
+                break :pwd std.c.getpwnam(name);
             }
         };
         if (pwd != null)
-            if (@as(*c.struct_passwd, pwd).pw_dir) |p|
+            if (pwd.?.dir) |p|
                 break :blk std.mem.span(p);
-        return alloc.dupeZ(u8, path);
+        return alloc.dupeSentinel(u8, path, 0);
     };
-    const home = std.mem.trimRight(u8, home_raw, "/");
+    const home = std.mem.trimEnd(u8, home_raw, "/");
 
-    if (home.len == 0 and path.len == len) return alloc.dupeZ(u8, "/");
+    if (home.len == 0 and path.len == len) return alloc.dupeSentinel(u8, "/", 0);
     return try std.mem.concatWithSentinel(alloc, u8, &.{ home, path[len..] }, 0);
 }
-
 
 // Silly abstraction to read a file one line at a time. Only exists to help
 // with supporting both Zig 0.14 and 0.15, can be removed once 0.14 support is
 // dropped.
-pub const LineReader = if (@hasDecl(std.io, "bufferedReader")) struct {
-    rd: std.io.BufferedReader(4096, std.fs.File.Reader),
-    fbs: std.io.FixedBufferStream([]u8),
+pub const LineReader = struct {
+    rd: std.Io.File.Reader,
 
-    pub fn init(f: std.fs.File, buf: []u8) @This() {
-        return .{
-            .rd = std.io.bufferedReader(f.reader()),
-            .fbs = std.io.fixedBufferStream(buf),
-        };
-    }
-
-    pub fn read(s: *@This()) !?[]u8 {
-        s.fbs.reset();
-        s.rd.reader().streamUntilDelimiter(s.fbs.writer(), '\n', s.fbs.buffer.len) catch |err| switch (err) {
-            error.EndOfStream => if (s.fbs.getPos() catch unreachable == 0) return null,
-            else => |e| return e,
-        };
-        return s.fbs.getWritten();
-    }
-
-} else struct {
-    rd: std.fs.File.Reader,
-
-    pub fn init(f: std.fs.File, buf: []u8) @This() {
-        return .{ .rd = f.readerStreaming(buf) };
+    pub fn init(io: std.Io, f: std.Io.File, buf: []u8) @This() {
+        return .{ .rd = f.readerStreaming(io, buf) };
     }
 
     pub fn read(s: *@This()) !?[]u8 {

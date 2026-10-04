@@ -46,8 +46,10 @@ pub const Ref = extern union {
     ref: u64 align(1),
 
     pub fn isNull(r: Ref) bool {
-        if (main.config.binreader) return r.ref == std.math.maxInt(u64)
-        else return r.ptr == null;
+        if (main.config.binreader)
+            return r.ref == std.math.maxInt(u64)
+        else
+            return r.ptr == null;
     }
 };
 
@@ -106,13 +108,14 @@ pub const Entry = extern struct {
         return @ptrCast(@as([*]Ext, @ptrCast(self)) - 1);
     }
 
-    fn alloc(comptime T: type, allocator: std.mem.Allocator, etype: EType, isext: bool, ename: []const u8) *Entry {
+    fn alloc(comptime T: type, allocator: std.mem.Allocator, io: std.Io, etype: EType, isext: bool, ename: []const u8) *Entry {
         const size = (if (isext) @as(usize, @sizeOf(Ext)) else 0) + @sizeOf(T) + ename.len + 1;
         var ptr = blk: while (true) {
             const alignment = if (@typeInfo(@TypeOf(std.mem.Allocator.allocWithOptions)).@"fn".params[3].type == ?u29) 1 else std.mem.Alignment.@"1";
-            if (allocator.allocWithOptions(u8, size, alignment, null)) |p| break :blk p
+            if (allocator.allocWithOptions(u8, size, alignment, null)) |p|
+                break :blk p
             else |_| {}
-            ui.oom();
+            ui.oom(io);
         };
         if (isext) {
             @as(*Ext, @ptrCast(ptr)).* = .{};
@@ -120,17 +123,17 @@ pub const Entry = extern struct {
         }
         const e: *T = @ptrCast(ptr);
         e.* = .{ .entry = .{ .pack = .{ .etype = etype, .isext = isext } } };
-        const n = @as([*]u8, @ptrCast(&e.name))[0..ename.len+1];
+        const n = @as([*]u8, @ptrCast(&e.name))[0 .. ename.len + 1];
         @memcpy(n[0..ename.len], ename);
         n[ename.len] = 0;
         return &e.entry;
     }
 
-    pub fn create(allocator: std.mem.Allocator, etype: EType, isext: bool, ename: []const u8) *Entry {
+    pub fn create(allocator: std.mem.Allocator, io: std.Io, etype: EType, isext: bool, ename: []const u8) *Entry {
         return switch (etype) {
-            .dir  => alloc(Dir, allocator, etype, isext, ename),
-            .link => alloc(Link, allocator, etype, isext, ename),
-            else => alloc(File, allocator, etype, isext, ename),
+            .dir => alloc(Dir, allocator, io, etype, isext, ename),
+            .link => alloc(Link, allocator, io, etype, isext, ename),
+            else => alloc(File, allocator, io, etype, isext, ename),
         };
     }
 
@@ -146,9 +149,10 @@ pub const Entry = extern struct {
     }
 
     fn hasErr(self: *Self) bool {
-        return
-            if(self.dir()) |d| d.pack.err or d.pack.suberr
-            else self.pack.etype == .err;
+        return if (self.dir()) |d|
+            d.pack.err or d.pack.suberr
+        else
+            self.pack.etype == .err;
     }
 
     fn removeLinks(self: *Entry) void {
@@ -211,7 +215,7 @@ pub const Dir = extern struct {
     // (Old C habits die hard)
     name: [0]u8 = undefined,
 
-    pub const Packed = packed struct {
+    pub const Packed = packed struct(u32) {
         // Indexes into the global 'devices.list' array
         dev: DevId = 0,
         err: bool = false,
@@ -227,9 +231,9 @@ pub const Dir = extern struct {
             if (withRoot or e.parent != null)
                 components.append(main.allocator, e.entry.name()) catch unreachable;
 
-        var i: usize = components.items.len-1;
+        var i: usize = components.items.len - 1;
         while (true) {
-            if (i != components.items.len-1 and !(out.items.len != 0 and out.items[out.items.len-1] == '/'))
+            if (i != components.items.len - 1 and !(out.items.len != 0 and out.items[out.items.len - 1] == '/'))
                 out.append(main.allocator, '/') catch unreachable;
             out.appendSlice(alloc, components.items[i]) catch unreachable;
             if (i == 0) break;
@@ -346,19 +350,18 @@ pub const Ext = extern struct {
     }
 };
 
-
 // List of st_dev entries. Those are typically 64bits, but that's quite a waste
 // of space when a typical scan won't cover many unique devices.
 pub const devices = struct {
-    var lock = std.Thread.Mutex{};
+    var lock: std.Io.Mutex = .init;
     // id -> dev
     pub var list: std.ArrayListUnmanaged(u64) = .empty;
     // dev -> id
     var lookup = std.AutoHashMap(u64, DevId).init(main.allocator);
 
-    pub fn getId(dev: u64) DevId {
-        lock.lock();
-        defer lock.unlock();
+    pub fn getId(io: std.Io, dev: u64) DevId {
+        lock.lock(io) catch {};
+        defer lock.unlock(io);
         const d = lookup.getOrPut(dev) catch unreachable;
         if (!d.found_existing) {
             if (list.items.len >= std.math.maxInt(DevId)) ui.die("Maximum number of device identifiers exceeded.\n", .{});
@@ -368,7 +371,6 @@ pub const devices = struct {
         return d.value_ptr.*;
     }
 };
-
 
 // Lookup table for ino -> *Link entries, used for hard link counting.
 pub const inodes = struct {
@@ -386,7 +388,7 @@ pub const inodes = struct {
     var uncounted = std.HashMap(*Link, void, HashContext, 80).init(main.allocator);
     var uncounted_full = true; // start with true for the initial scan
 
-    pub var lock = std.Thread.Mutex{};
+    pub var lock: std.Io.Mutex = .init;
 
     const HashContext = struct {
         pub fn hash(_: @This(), l: *Link) u64 {
@@ -403,11 +405,10 @@ pub const inodes = struct {
 
     fn addUncounted(l: *Link) void {
         if (uncounted_full) return;
-        if (uncounted.count() > map.count()/8) {
+        if (uncounted.count() > map.count() / 8) {
             uncounted.clearAndFree();
             uncounted_full = true;
-        } else
-            (uncounted.getOrPut(l) catch unreachable).key_ptr.* = l;
+        } else (uncounted.getOrPut(l) catch unreachable).key_ptr.* = l;
     }
 
     // Add/remove this inode from the parent Dir sizes. When removing stats,
@@ -429,8 +430,10 @@ pub const inodes = struct {
             var parent: ?*Dir = it.parent;
             while (parent) |p| : (parent = p.parent) {
                 const de = dirs.getOrPut(p) catch unreachable;
-                if (de.found_existing) de.value_ptr.* += 1
-                else de.value_ptr.* = 1;
+                if (de.found_existing)
+                    de.value_ptr.* += 1
+                else
+                    de.value_ptr.* = 1;
             }
             it = it.next;
             if (it == l)
@@ -452,19 +455,19 @@ pub const inodes = struct {
         if (add) {
             while (dir_iter.next()) |de| {
                 de.key_ptr.*.entry.pack.blocks +|= l.entry.pack.blocks;
-                de.key_ptr.*.entry.size        +|= l.entry.size;
+                de.key_ptr.*.entry.size +|= l.entry.size;
                 if (de.value_ptr.* < nlink) {
                     de.key_ptr.*.shared_blocks +|= l.entry.pack.blocks;
-                    de.key_ptr.*.shared_size   +|= l.entry.size;
+                    de.key_ptr.*.shared_size +|= l.entry.size;
                 }
             }
         } else {
             while (dir_iter.next()) |de| {
                 de.key_ptr.*.entry.pack.blocks -|= l.entry.pack.blocks;
-                de.key_ptr.*.entry.size        -|= l.entry.size;
+                de.key_ptr.*.entry.size -|= l.entry.size;
                 if (de.value_ptr.* < nlink) {
                     de.key_ptr.*.shared_blocks -|= l.entry.pack.blocks;
-                    de.key_ptr.*.shared_size   -|= l.entry.size;
+                    de.key_ptr.*.shared_size -|= l.entry.size;
                 }
             }
         }
@@ -474,7 +477,7 @@ pub const inodes = struct {
     pub var add_total: usize = 0;
     pub var add_done: usize = 0;
 
-    pub fn addAllStats() void {
+    pub fn addAllStats(io: std.Io) void {
         if (uncounted_full) {
             add_total = map.count();
             add_done = 0;
@@ -482,7 +485,7 @@ pub const inodes = struct {
             while (it.next()) |e| {
                 setStats(e.*, true);
                 add_done += 1;
-                if ((add_done & 65) == 0) main.handleEvent(false, false);
+                if ((add_done & 65) == 0) main.handleEvent(io, false, false);
             }
         } else {
             add_total = uncounted.count();
@@ -491,7 +494,7 @@ pub const inodes = struct {
             while (it.next()) |u| {
                 if (map.getKey(u.*)) |e| setStats(e, true);
                 add_done += 1;
-                if ((add_done & 65) == 0) main.handleEvent(false, false);
+                if ((add_done & 65) == 0) main.handleEvent(io, false, false);
             }
         }
         uncounted_full = false;
@@ -500,12 +503,10 @@ pub const inodes = struct {
     }
 };
 
-
 pub var root: *Dir = undefined;
 
-
 test "entry" {
-    var e = Entry.create(std.testing.allocator, .reg, false, "hello");
+    var e = Entry.create(std.testing.allocator, std.testing.io, .reg, false, "hello");
     defer e.destroy(std.testing.allocator);
     try std.testing.expectEqual(e.pack.etype, .reg);
     try std.testing.expect(!e.pack.isext);

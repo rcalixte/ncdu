@@ -3,9 +3,9 @@
 
 *.swp
 *~
+.zig-cache
+.zig-pkg
 ncurses
-zstd
 static-*/
-zig-cache/
-zig-out/
-.zig-cache/
+zig-out
+zstd

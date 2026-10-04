@@ -10,7 +10,7 @@ const scan = @import("scan.zig");
 const sink = @import("sink.zig");
 const mem_sink = @import("mem_sink.zig");
 const util = @import("util.zig");
-const c = @import("c.zig").c;
+const c = @import("c");
 
 var parent: *model.Dir = undefined;
 var entry: *model.Entry = undefined;
@@ -28,65 +28,61 @@ pub fn setup(p: *model.Dir, e: *model.Entry, n: ?*model.Entry) void {
     confirm = .no;
 }
 
-
 // Returns true to abort scanning.
-fn err(e: anyerror) bool {
+fn err(io: std.Io, e: anyerror) bool {
     if (main.config.ignore_delete_errors)
         return false;
     error_code = e;
     state = .err;
 
     while (main.state == .delete and state == .err)
-        main.handleEvent(true, false);
+        main.handleEvent(io, true, false);
 
     return main.state != .delete;
 }
 
-fn deleteItem(dir: std.fs.Dir, path: [:0]const u8, ptr: *align(1) ?*model.Entry) bool {
+fn deleteItem(io: std.Io, dir: std.Io.Dir, path: [:0]const u8, ptr: *align(1) ?*model.Entry) bool {
     entry = ptr.*.?;
-    main.handleEvent(false, false);
+    main.handleEvent(io, false, false);
     if (main.state != .delete)
         return true;
 
     if (entry.dir()) |d| {
-        var fd = dir.openDirZ(path, .{ .no_follow = true, .iterate = false }) catch |e| return err(e);
+        var fd = dir.openDir(io, path, .{ .follow_symlinks = false, .iterate = false }) catch |e| return err(io, e);
         var it = &d.sub.ptr;
         parent = d;
         defer parent = parent.parent.?;
         while (it.*) |n| {
-            if (deleteItem(fd, n.name(), it)) {
-                fd.close();
+            if (deleteItem(io, fd, n.name(), it)) {
+                fd.close(io);
                 return true;
             }
             if (it.* == n) // item deletion failed, make sure to still advance to next
                 it = &n.next.ptr;
         }
-        fd.close();
-        dir.deleteDirZ(path) catch |e|
-            return if (e != error.DirNotEmpty or d.sub.ptr == null) err(e) else false;
-    } else
-        dir.deleteFileZ(path) catch |e| return err(e);
+        fd.close(io);
+        dir.deleteDir(io, path) catch |e|
+            return if (e != error.DirNotEmpty or d.sub.ptr == null) err(io, e) else false;
+    } else dir.deleteFile(io, path) catch |e| return err(io, e);
     ptr.*.?.zeroStats(parent);
     ptr.* = ptr.*.?.next.ptr;
     return false;
 }
 
 // Returns true if the item has been deleted successfully.
-fn deleteCmd(path: [:0]const u8, ptr: *align(1) ?*model.Entry) bool {
+fn deleteCmd(io: std.Io, environ_map: *std.process.Environ.Map, path: [:0]const u8, ptr: *align(1) ?*model.Entry) bool {
     {
-        var env = std.process.getEnvMap(main.allocator) catch unreachable;
-        defer env.deinit();
-        env.put("NCDU_DELETE_PATH", path) catch unreachable;
+        environ_map.put("NCDU_DELETE_PATH", path) catch @panic("Failed to put NCDU_DELETE_PATH in environment");
 
         // Since we're passing the path as an environment variable and go through
         // the shell anyway, we can refer to the variable and avoid error-prone
         // shell escaping.
         const cmd = std.fmt.allocPrint(main.allocator, "{s} \"$NCDU_DELETE_PATH\"", .{main.config.delete_command}) catch unreachable;
         defer main.allocator.free(cmd);
-        ui.runCmd(&.{"/bin/sh", "-c", cmd}, null, &env, true);
+        ui.runCmd(io, &.{ "/bin/sh", "-c", cmd }, null, environ_map, true);
     }
 
-    const stat = scan.statAt(std.fs.cwd(), path, false, null) catch {
+    const stat = scan.statAt(std.Io.Dir.cwd(), path, false, null) catch {
         // Stat failed. Would be nice to display an error if it's not
         // 'FileNotFound', but w/e, let's just assume the item has been
         // deleted as expected.
@@ -98,12 +94,12 @@ fn deleteCmd(path: [:0]const u8, ptr: *align(1) ?*model.Entry) bool {
     // If either old or new entry is not a dir, remove & re-add entry in the in-memory tree.
     if (ptr.*.?.pack.etype != .dir or stat.etype != .dir) {
         ptr.*.?.zeroStats(parent);
-        const e = model.Entry.create(main.allocator, stat.etype, main.config.extended and !stat.ext.isEmpty(), ptr.*.?.name());
+        const e = model.Entry.create(main.allocator, io, stat.etype, main.config.extended and !stat.ext.isEmpty(), ptr.*.?.name());
         e.next.ptr = ptr.*.?.next.ptr;
-        mem_sink.statToEntry(&stat, e, parent);
+        mem_sink.statToEntry(io, &stat, e, parent);
         ptr.* = e;
 
-        var it : ?*model.Dir = parent;
+        var it: ?*model.Dir = parent;
         while (it) |p| : (it = p.parent) {
             if (stat.etype != .link) {
                 p.entry.pack.blocks +|= e.pack.blocks;
@@ -123,9 +119,9 @@ fn deleteCmd(path: [:0]const u8, ptr: *align(1) ?*model.Entry) bool {
 }
 
 // Returns the item that should be selected in the browser.
-pub fn delete() ?*model.Entry {
+pub fn delete(init: std.process.Init) ?*model.Entry {
     while (main.state == .delete and state == .confirm)
-        main.handleEvent(true, false);
+        main.handleEvent(init.io, true, false);
     if (main.state != .delete)
         return entry;
 
@@ -139,17 +135,17 @@ pub fn delete() ?*model.Entry {
     var path: std.ArrayListUnmanaged(u8) = .empty;
     defer path.deinit(main.allocator);
     parent.fmtPath(main.allocator, true, &path);
-    if (path.items.len == 0 or path.items[path.items.len-1] != '/')
+    if (path.items.len == 0 or path.items[path.items.len - 1] != '/')
         path.append(main.allocator, '/') catch unreachable;
     path.appendSlice(main.allocator, entry.name()) catch unreachable;
 
     if (main.config.delete_command.len == 0) {
-        _ = deleteItem(std.fs.cwd(), util.arrayListBufZ(&path, main.allocator), it);
-        model.inodes.addAllStats();
+        _ = deleteItem(init.io, std.Io.Dir.cwd(), util.arrayListBufZ(&path, main.allocator), it);
+        model.inodes.addAllStats(init.io);
         return if (it.* == e) e else next_sel;
     } else {
-        const isdel = deleteCmd(util.arrayListBufZ(&path, main.allocator), it);
-        model.inodes.addAllStats();
+        const isdel = deleteCmd(init.io, init.environ_map, util.arrayListBufZ(&path, main.allocator), it);
+        model.inodes.addAllStats(init.io);
         return if (isdel) next_sel else it.*;
     }
 }
@@ -190,9 +186,9 @@ fn drawConfirm() void {
     ui.style(if (confirm == .ignore) .sel else .default);
     ui.addstr("don't ask me again");
     box.move(4, switch (confirm) {
-        .yes    => 15,
-        .no     => 25,
-        .ignore => 31
+        .yes => 15,
+        .no => 25,
+        .ignore => 31,
     });
 }
 
@@ -271,7 +267,7 @@ pub fn keyInput(ch: i32) void {
                     state = .busy;
                 },
             },
-            else => {}
+            else => {},
         },
         .busy => {
             if (ch == 'q')
@@ -295,7 +291,7 @@ pub fn keyInput(ch: i32) void {
                     state = .busy;
                 },
             },
-            else => {}
+            else => {},
         },
     }
 }

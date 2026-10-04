@@ -52,7 +52,6 @@ const util = @import("util.zig");
 // Rule:
 //   No concurrent method calls on a single Dir object, but objects may be passed between threads.
 
-
 // Concise stat struct for fields we're interested in, with the types used by the model.
 pub const Stat = struct {
     etype: model.EType = .reg,
@@ -63,7 +62,6 @@ pub const Stat = struct {
     nlink: u31 = 0,
     ext: model.Ext = .{},
 };
-
 
 pub const Dir = struct {
     refcnt: std.atomic.Value(usize) = std.atomic.Value(usize).init(1),
@@ -77,38 +75,38 @@ pub const Dir = struct {
         bin: bin_export.Dir,
     };
 
-    pub fn addSpecial(d: *Dir, t: *Thread, name: []const u8, sp: model.EType) void {
+    pub fn addSpecial(d: *Dir, io: std.Io, t: *Thread, name: []const u8, sp: model.EType) void {
         std.debug.assert(@intFromEnum(sp) < 0); // >=0 aren't "special"
         _ = t.files_seen.fetchAdd(1, .monotonic);
         switch (d.out) {
-            .mem => |*m| m.addSpecial(&t.sink.mem, name, sp),
-            .json => |*j| j.addSpecial(name, sp),
-            .bin => |*b| b.addSpecial(&t.sink.bin, name, sp),
+            .mem => |*m| m.addSpecial(io, &t.sink.mem, name, sp),
+            .json => |*j| j.addSpecial(io, name, sp),
+            .bin => |*b| b.addSpecial(io, &t.sink.bin, name, sp),
         }
         if (sp == .err) {
-            global.last_error_lock.lock();
-            defer global.last_error_lock.unlock();
+            global.last_error_lock.lock(io) catch {};
+            defer global.last_error_lock.unlock(io);
             if (global.last_error) |p| main.allocator.free(p);
             const p = d.path();
-            global.last_error = std.fs.path.joinZ(main.allocator, &.{ p, name }) catch unreachable;
+            global.last_error = std.Io.Dir.path.joinZ(main.allocator, &.{ p, name }) catch unreachable;
             main.allocator.free(p);
         }
     }
 
-    pub fn addStat(d: *Dir, t: *Thread, name: []const u8, stat: *const Stat) void {
+    pub fn addStat(d: *Dir, io: std.Io, t: *Thread, name: []const u8, stat: *const Stat) void {
         _ = t.files_seen.fetchAdd(1, .monotonic);
-        _ = t.addBytes((stat.blocks *| 512) / @max(1, stat.nlink));
+        _ = t.addBytes(io, (stat.blocks *| 512) / @max(1, stat.nlink));
         std.debug.assert(stat.etype != .dir);
         switch (d.out) {
-            .mem => |*m| _ = m.addStat(&t.sink.mem, name, stat),
-            .json => |*j| j.addStat(name, stat),
-            .bin => |*b| b.addStat(&t.sink.bin, name, stat),
+            .mem => |*m| _ = m.addStat(io, &t.sink.mem, name, stat),
+            .json => |*j| j.addStat(io, name, stat),
+            .bin => |*b| b.addStat(io, &t.sink.bin, name, stat),
         }
     }
 
-    pub fn addDir(d: *Dir, t: *Thread, name: []const u8, stat: *const Stat) *Dir {
+    pub fn addDir(d: *Dir, io: std.Io, t: *Thread, name: []const u8, stat: *const Stat) *Dir {
         _ = t.files_seen.fetchAdd(1, .monotonic);
-        _ = t.addBytes(stat.blocks *| 512);
+        _ = t.addBytes(io, stat.blocks *| 512);
         std.debug.assert(stat.etype == .dir);
         std.debug.assert(d.out != .json or d.refcnt.load(.monotonic) == 1);
 
@@ -117,24 +115,24 @@ pub const Dir = struct {
             .name = main.allocator.dupe(u8, name) catch unreachable,
             .parent = d,
             .out = switch (d.out) {
-                .mem => |*m| .{ .mem = m.addDir(&t.sink.mem, name, stat) },
-                .json => |*j| .{ .json = j.addDir(name, stat) },
-                .bin => |*b| .{ .bin = b.addDir(stat) },
+                .mem => |*m| .{ .mem = m.addDir(io, &t.sink.mem, name, stat) },
+                .json => |*j| .{ .json = j.addDir(io, name, stat) },
+                .bin => |*b| .{ .bin = b.addDir(io, stat) },
             },
         };
         d.ref();
         return s;
     }
 
-    pub fn setReadError(d: *Dir, t: *Thread) void {
+    pub fn setReadError(d: *Dir, io: std.Io, t: *Thread) void {
         _ = t;
         switch (d.out) {
             .mem => |*m| m.setReadError(),
             .json => |*j| j.setReadError(),
-            .bin => |*b| b.setReadError(),
+            .bin => |*b| b.setReadError(io),
         }
-        global.last_error_lock.lock();
-        defer global.last_error_lock.unlock();
+        global.last_error_lock.lock(io) catch {};
+        defer global.last_error_lock.unlock(io);
         if (global.last_error) |p| main.allocator.free(p);
         global.last_error = d.path();
     }
@@ -146,9 +144,9 @@ pub const Dir = struct {
         while (it) |e| : (it = e.parent) components.append(main.allocator, e.name) catch unreachable;
 
         var out: std.ArrayListUnmanaged(u8) = .empty;
-        var i: usize = components.items.len-1;
+        var i: usize = components.items.len - 1;
         while (true) {
-            if (i != components.items.len-1 and !(out.items.len != 0 and out.items[out.items.len-1] == '/'))
+            if (i != components.items.len - 1 and !(out.items.len != 0 and out.items[out.items.len - 1] == '/'))
                 out.append(main.allocator, '/') catch unreachable;
             out.appendSlice(main.allocator, components.items[i]) catch unreachable;
             if (i == 0) break;
@@ -161,26 +159,25 @@ pub const Dir = struct {
         _ = d.refcnt.fetchAdd(1, .monotonic);
     }
 
-    pub fn unref(d: *Dir, t: *Thread) void {
+    pub fn unref(d: *Dir, io: std.Io, t: *Thread) void {
         if (d.refcnt.fetchSub(1, .release) != 1) return;
         _ = d.refcnt.load(.acquire);
 
         switch (d.out) {
-            .mem => |*m| m.final(if (d.parent) |p| &p.out.mem else null),
-            .json => |*j| j.final(),
-            .bin => |*b| b.final(&t.sink.bin, d.name, if (d.parent) |p| &p.out.bin else null),
+            .mem => |*m| m.final(io, if (d.parent) |p| &p.out.mem else null),
+            .json => |*j| j.final(io),
+            .bin => |*b| b.final(io, &t.sink.bin, d.name, if (d.parent) |p| &p.out.bin else null),
         }
 
-        if (d.parent) |p| p.unref(t);
+        if (d.parent) |p| p.unref(io, t);
         if (d.name.len > 0) main.allocator.free(d.name);
         main.allocator.destroy(d);
     }
 };
 
-
 pub const Thread = struct {
     current_dir: ?*Dir = null,
-    lock: std.Thread.Mutex = .{},
+    lock: std.Io.Mutex = .init,
     // On 32-bit architectures, bytes_seen is protected by the above mutex instead.
     bytes_seen: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     files_seen: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -189,33 +186,34 @@ pub const Thread = struct {
         mem: mem_sink.Thread,
         json: void,
         bin: bin_export.Thread,
-    } = .{.mem = .{}},
+    } = .{ .mem = .{} },
 
-    fn addBytes(t: *Thread, bytes: u64) void {
-        if (@bitSizeOf(usize) >= 64) _ = t.bytes_seen.fetchAdd(bytes, .monotonic)
+    fn addBytes(t: *Thread, io: std.Io, bytes: u64) void {
+        if (@bitSizeOf(usize) >= 64)
+            _ = t.bytes_seen.fetchAdd(bytes, .monotonic)
         else {
-            t.lock.lock();
-            defer t.lock.unlock();
+            t.lock.lock(io) catch {};
+            defer t.lock.unlock(io);
             t.bytes_seen.raw += bytes;
         }
     }
 
-    fn getBytes(t: *Thread) u64 {
-        if (@bitSizeOf(usize) >= 64) return t.bytes_seen.load(.monotonic)
+    fn getBytes(t: *Thread, io: std.Io) u64 {
+        if (@bitSizeOf(usize) >= 64)
+            return t.bytes_seen.load(.monotonic)
         else {
-            t.lock.lock();
-            defer t.lock.unlock();
+            t.lock.lock(io) catch {};
+            defer t.lock.unlock(io);
             return t.bytes_seen.raw;
         }
     }
 
-    pub fn setDir(t: *Thread, d: ?*Dir) void {
-        t.lock.lock();
-        defer t.lock.unlock();
+    pub fn setDir(t: *Thread, io: std.Io, d: ?*Dir) void {
+        t.lock.lock(io) catch {};
+        defer t.lock.unlock(io);
         t.current_dir = d;
     }
 };
-
 
 pub const global = struct {
     pub var state: enum { done, err, zeroing, hlcnt, running } = .running;
@@ -223,10 +221,9 @@ pub const global = struct {
     pub var sink: enum { json, mem, bin } = .mem;
 
     pub var last_error: ?[:0]u8 = null;
-    var last_error_lock = std.Thread.Mutex{};
+    var last_error_lock: std.Io.Mutex = .init;
     var need_confirm_quit = false;
 };
-
 
 // Must be the first thing to call from a source; initializes global state.
 pub fn createThreads(num: usize) []Thread {
@@ -242,21 +239,20 @@ pub fn createThreads(num: usize) []Thread {
     global.threads = main.allocator.alloc(Thread, num) catch unreachable;
     for (global.threads) |*t| t.* = .{
         .sink = switch (global.sink) {
-            .mem  => .{ .mem  = .{} },
+            .mem => .{ .mem = .{} },
             .json => .{ .json = {} },
-            .bin  => .{ .bin  = .{} },
+            .bin => .{ .bin = .{} },
         },
     };
     return global.threads;
 }
 
-
 // Must be the last thing to call from a source.
-pub fn done() void {
+pub fn done(io: std.Io) void {
     switch (global.sink) {
-        .mem => mem_sink.done(),
-        .json => json_export.done(),
-        .bin => bin_export.done(global.threads),
+        .mem => mem_sink.done(io),
+        .json => json_export.done(io),
+        .bin => bin_export.done(io, global.threads),
     }
     global.state = .done;
     main.allocator.free(global.threads);
@@ -264,44 +260,41 @@ pub fn done() void {
     // We scanned into memory, now we need to scan from memory to JSON
     if (global.sink == .mem and !mem_sink.global.stats) {
         global.sink = .json;
-        mem_src.run(model.root);
+        mem_src.run(io, model.root);
     }
 
     // Clear the screen when done.
-    if (main.config.scan_ui == .line) main.handleEvent(false, true);
+    if (main.config.scan_ui == .line) main.handleEvent(io, false, true);
 }
 
-
-pub fn createRoot(path: []const u8, stat: *const Stat) *Dir {
+pub fn createRoot(io: std.Io, path: []const u8, stat: *const Stat) *Dir {
     const d = main.allocator.create(Dir) catch unreachable;
     d.* = .{
         .name = main.allocator.dupe(u8, path) catch unreachable,
         .parent = null,
         .out = switch (global.sink) {
-            .mem => .{ .mem = mem_sink.createRoot(path, stat) },
-            .json => .{ .json = json_export.createRoot(path, stat) },
+            .mem => .{ .mem = mem_sink.createRoot(io, path, stat) },
+            .json => .{ .json = json_export.createRoot(io, path, stat) },
             .bin => .{ .bin = bin_export.createRoot(stat, global.threads) },
         },
     };
     return d;
 }
 
-
-fn drawConsole() void {
+fn drawConsole(io: std.Io) void {
     const st = struct {
         var ansi: ?bool = null;
         var lines_written: usize = 0;
     };
-    const stderr = if (@hasDecl(std.io, "getStdErr")) std.io.getStdErr() else std.fs.File.stderr();
+    const stderr = std.Io.File.stderr();
     const ansi = st.ansi orelse blk: {
-        const t = stderr.supportsAnsiEscapeCodes();
+        const t = stderr.supportsAnsiEscapeCodes(io) catch false;
         st.ansi = t;
         break :blk t;
     };
 
     var buf: [4096]u8 = undefined;
-    var strm = std.io.fixedBufferStream(buf[0..]);
-    var wr = strm.writer();
+    var wr: std.Io.Writer = .fixed(&buf);
     while (ansi and st.lines_written > 0) {
         wr.writeAll("\x1b[1F\x1b[2K") catch {};
         st.lines_written -= 1;
@@ -313,41 +306,41 @@ fn drawConsole() void {
             wr.print(" {} / {}", .{ model.inodes.add_done, model.inodes.add_total }) catch {};
         wr.writeByte('\n') catch {};
         st.lines_written += 1;
-
     } else if (global.state == .running) {
         var bytes: u64 = 0;
         var files: u64 = 0;
         for (global.threads) |*t| {
-            bytes +|= t.getBytes();
+            bytes +|= t.getBytes(io);
             files += t.files_seen.load(.monotonic);
         }
         const r = ui.FmtSize.fmt(bytes);
-        wr.print("{} files / {s}{s}\n", .{files, r.num(), r.unit}) catch {};
+        wr.print("{} files / {s}{s}\n", .{ files, r.num(), r.unit }) catch {};
         st.lines_written += 1;
 
         for (global.threads, 0..) |*t, i| {
             const dir = blk: {
-                t.lock.lock();
-                defer t.lock.unlock();
+                t.lock.lock(io) catch {};
+                defer t.lock.unlock(io);
                 break :blk if (t.current_dir) |d| d.path() else null;
             };
-            wr.print("  #{}: {s}\n", .{i+1, ui.shorten(ui.toUtf8(dir orelse "(waiting)"), 73)}) catch {};
+            wr.print("  #{}: {s}\n", .{ i + 1, ui.shorten(ui.toUtf8(dir orelse "(waiting)"), 73) }) catch {};
             st.lines_written += 1;
             if (dir) |p| main.allocator.free(p);
         }
     }
 
-    stderr.writeAll(strm.getWritten()) catch {};
+    stderr.writeStreamingAll(io, std.fmt.bufPrint(&buf, "{d}\n", .{wr.end}) catch @panic("failed to write to stderr")) catch {};
 }
 
-
-fn drawProgress() void {
-    const st = struct { var animation_pos: usize = 0; };
+fn drawProgress(io: std.Io) void {
+    const st = struct {
+        var animation_pos: usize = 0;
+    };
 
     var bytes: u64 = 0;
     var files: u64 = 0;
     for (global.threads) |*t| {
-        bytes +|= t.getBytes();
+        bytes +|= t.getBytes(io);
         files += t.files_seen.load(.monotonic);
     }
 
@@ -366,11 +359,11 @@ fn drawProgress() void {
     }
 
     for (0..numthreads) |i| {
-        box.move(3+@as(u32, @intCast(i)), 4);
+        box.move(3 + @as(u32, @intCast(i)), 4);
         const dir = blk: {
             const t = &global.threads[i];
-            t.lock.lock();
-            defer t.lock.unlock();
+            t.lock.lock(io) catch {};
+            defer t.lock.unlock(io);
             break :blk if (t.current_dir) |d| d.path() else null;
         };
         ui.addstr(ui.shorten(ui.toUtf8(dir orelse "(waiting)"), width -| 6));
@@ -378,8 +371,8 @@ fn drawProgress() void {
     }
 
     blk: {
-        global.last_error_lock.lock();
-        defer global.last_error_lock.unlock();
+        global.last_error_lock.lock(io) catch {};
+        defer global.last_error_lock.unlock(io);
         const err = global.last_error orelse break :blk;
         box.move(4 + numthreads, 2);
         ui.style(.bold);
@@ -410,20 +403,19 @@ fn drawProgress() void {
     if (main.config.update_delay < std.time.ns_per_s and width > 40) {
         const txt = "Scanning...";
         st.animation_pos += 1;
-        if (st.animation_pos >= txt.len*2) st.animation_pos = 0;
+        if (st.animation_pos >= txt.len * 2) st.animation_pos = 0;
         if (st.animation_pos < txt.len) {
             box.move(6 + numthreads, 2);
-            for (txt[0..st.animation_pos + 1]) |t| ui.addch(t);
+            for (txt[0 .. st.animation_pos + 1]) |t| ui.addch(t);
         } else {
-            var i: u32 = txt.len-1;
-            while (i > st.animation_pos-txt.len) : (i -= 1) {
-                box.move(6 + numthreads, 2+i);
+            var i: u32 = txt.len - 1;
+            while (i > st.animation_pos - txt.len) : (i -= 1) {
+                box.move(6 + numthreads, 2 + i);
                 ui.addch(txt[i]);
             }
         }
     }
 }
-
 
 fn drawError() void {
     const width = ui.cols -| 5;
@@ -438,7 +430,6 @@ fn drawError() void {
     ui.addstr("Press any key to continue");
 }
 
-
 fn drawMessage(msg: []const u8) void {
     const width = ui.cols -| 5;
     const box = ui.Box.create(4, width, "Scan error");
@@ -446,11 +437,10 @@ fn drawMessage(msg: []const u8) void {
     ui.addstr(msg);
 }
 
-
-pub fn draw() void {
+pub fn draw(io: std.Io) void {
     switch (main.config.scan_ui.?) {
         .none => {},
-        .line => drawConsole(),
+        .line => drawConsole(io),
         .full => {
             ui.init();
             switch (global.state) {
@@ -471,12 +461,11 @@ pub fn draw() void {
                         ui.addnum(.default, model.inodes.add_total);
                     }
                 },
-                .running => drawProgress(),
+                .running => drawProgress(io),
             }
         },
     }
 }
-
 
 pub fn keyInput(ch: i32) void {
     switch (global.state) {
@@ -487,8 +476,10 @@ pub fn keyInput(ch: i32) void {
         .running => {
             switch (ch) {
                 'q' => {
-                    if (main.config.confirm_quit) global.need_confirm_quit = !global.need_confirm_quit
-                   else ui.quit();
+                    if (main.config.confirm_quit)
+                        global.need_confirm_quit = !global.need_confirm_quit
+                    else
+                        ui.quit();
                 },
                 'y', 'Y' => if (global.need_confirm_quit) ui.quit(),
                 else => global.need_confirm_quit = false,

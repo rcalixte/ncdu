@@ -7,7 +7,7 @@ const model = @import("model.zig");
 const sink = @import("sink.zig");
 const util = @import("util.zig");
 const ui = @import("ui.zig");
-const c = @import("c.zig").c;
+const c = @import("c");
 
 // JSON output is necessarily single-threaded and items MUST be added depth-first.
 
@@ -15,13 +15,12 @@ pub const global = struct {
     var writer: *Writer = undefined;
 };
 
-
 const ZstdWriter = struct {
     ctx: ?*c.ZSTD_CStream,
     out: c.ZSTD_outBuffer,
     outbuf: [c.ZSTD_BLOCKSIZE_MAX + 64]u8,
 
-    fn create() *ZstdWriter {
+    fn create(io: std.Io) *ZstdWriter {
         const w = main.allocator.create(ZstdWriter) catch unreachable;
         w.out = .{
             .dst = &w.outbuf,
@@ -31,7 +30,7 @@ const ZstdWriter = struct {
         while (true) {
             w.ctx = c.ZSTD_createCStream();
             if (w.ctx != null) break;
-            ui.oom();
+            ui.oom(io);
         }
         _ = c.ZSTD_CCtx_setParameter(w.ctx, c.ZSTD_c_compressionLevel, main.config.complevel);
         return w;
@@ -42,7 +41,7 @@ const ZstdWriter = struct {
         main.allocator.destroy(w);
     }
 
-    fn write(w: *ZstdWriter, f: std.fs.File, in: []const u8, flush: bool) !void {
+    fn write(w: *ZstdWriter, io: std.Io, f: std.Io.File, in: []const u8, flush: bool) !void {
         var arg = c.ZSTD_inBuffer{
             .src = in.ptr,
             .size = in.len,
@@ -52,7 +51,7 @@ const ZstdWriter = struct {
             const v = c.ZSTD_compressStream2(w.ctx, &w.out, &arg, if (flush) c.ZSTD_e_end else c.ZSTD_e_continue);
             if (c.ZSTD_isError(v) != 0) return error.ZstdCompressError;
             if (flush or w.out.pos > w.outbuf.len / 2) {
-                try f.writeAll(w.outbuf[0..w.out.pos]);
+                try f.writeStreamingAll(io, w.outbuf[0..w.out.pos]);
                 w.out.pos = 0;
             }
             if (!flush and arg.pos == arg.size) break;
@@ -62,29 +61,29 @@ const ZstdWriter = struct {
 };
 
 pub const Writer = struct {
-    fd: std.fs.File,
+    fd: std.Io.File,
     zstd: ?*ZstdWriter = null,
     // Must be large enough to hold PATH_MAX*6 plus some overhead.
     // (The 6 is because, in the worst case, every byte expands to a "\u####"
     // escape, and we do pessimistic estimates here in order to avoid checking
     // buffer lengths for each and every write operation)
-    buf: [64*1024]u8 = undefined,
+    buf: [64 * 1024]u8 = undefined,
     off: usize = 0,
     dir_entry_open: bool = false,
 
-    fn flush(ctx: *Writer, bytes: usize) void {
+    fn flush(ctx: *Writer, io: std.Io, bytes: usize) void {
         @branchHint(.unlikely);
         // This can only really happen when the root path exceeds PATH_MAX,
         // in which case we would probably have error'ed out earlier anyway.
         if (bytes > ctx.buf.len) ui.die("Error writing JSON export: path too long.\n", .{});
         const buf = ctx.buf[0..ctx.off];
-        (if (ctx.zstd) |z| z.write(ctx.fd, buf, bytes == 0) else ctx.fd.writeAll(buf)) catch |e|
-            ui.die("Error writing to file: {s}.\n", .{ ui.errorString(e) });
+        (if (ctx.zstd) |z| z.write(io, ctx.fd, buf, bytes == 0) else ctx.fd.writeStreamingAll(io, buf)) catch |e|
+            ui.die("Error writing to file: {s}.\n", .{ui.errorString(e)});
         ctx.off = 0;
     }
 
-    fn ensureSpace(ctx: *Writer, bytes: usize) void {
-        if (bytes > ctx.buf.len - ctx.off) ctx.flush(bytes);
+    fn ensureSpace(ctx: *Writer, io: std.Io, bytes: usize) void {
+        if (bytes > ctx.buf.len - ctx.off) ctx.flush(io, bytes);
     }
 
     fn write(ctx: *Writer, s: []const u8) void {
@@ -100,20 +99,19 @@ pub const Writer = struct {
     // Write escaped string contents, excluding the quotes.
     fn writeStr(ctx: *Writer, s: []const u8) void {
         for (s) |b| {
-            if (b >= 0x20 and b != '"' and b != '\\' and b != 127) ctx.writeByte(b)
-            else switch (b) {
+            if (b >= 0x20 and b != '"' and b != '\\' and b != 127) ctx.writeByte(b) else switch (b) {
                 '\n' => ctx.write("\\n"),
                 '\r' => ctx.write("\\r"),
-                0x8  => ctx.write("\\b"),
+                0x8 => ctx.write("\\b"),
                 '\t' => ctx.write("\\t"),
-                0xC  => ctx.write("\\f"),
+                0xC => ctx.write("\\f"),
                 '\\' => ctx.write("\\\\"),
-                '"'  => ctx.write("\\\""),
+                '"' => ctx.write("\\\""),
                 else => {
                     ctx.write("\\u00");
                     const hexdig = "0123456789abcdef";
-                    ctx.writeByte(hexdig[b>>4]);
-                    ctx.writeByte(hexdig[b&0xf]);
+                    ctx.writeByte(hexdig[b >> 4]);
+                    ctx.writeByte(hexdig[b & 0xf]);
                 },
             }
         }
@@ -138,12 +136,12 @@ pub const Writer = struct {
         ctx.write(buf[index..]);
     }
 
-    fn init(out: std.fs.File) *Writer {
+    fn init(io: std.Io, out: std.Io.File) *Writer {
         var ctx = main.allocator.create(Writer) catch unreachable;
         ctx.* = .{ .fd = out };
-        if (main.config.compress) ctx.zstd = ZstdWriter.create();
+        if (main.config.compress) ctx.zstd = ZstdWriter.create(io);
         ctx.write("[1,2,{\"progname\":\"ncdu\",\"progver\":\"" ++ main.program_version ++ "\",\"timestamp\":");
-        ctx.writeUint(@intCast(@max(0, std.time.timestamp())));
+        ctx.writeUint(@intCast(@max(0, std.Io.Clock.real.now(io).toSeconds())));
         ctx.writeByte('}');
         return ctx;
     }
@@ -161,9 +159,9 @@ pub const Writer = struct {
         }
     }
 
-    fn writeSpecial(ctx: *Writer, name: []const u8, t: model.EType) void {
+    fn writeSpecial(ctx: *Writer, io: std.Io, name: []const u8, t: model.EType) void {
         ctx.closeDirEntry(false);
-        ctx.ensureSpace(name.len*6 + 1000);
+        ctx.ensureSpace(io, name.len * 6 + 1000);
         ctx.write(if (t.isDirectory()) ",\n[{\"name\":\"" else ",\n{\"name\":\"");
         ctx.writeStr(name);
         ctx.write(switch (t) {
@@ -176,8 +174,8 @@ pub const Writer = struct {
         if (t.isDirectory()) ctx.writeByte(']');
     }
 
-    fn writeStat(ctx: *Writer, name: []const u8, stat: *const sink.Stat, parent_dev: u64) void {
-        ctx.ensureSpace(name.len*6 + 1000);
+    fn writeStat(ctx: *Writer, io: std.Io, name: []const u8, stat: *const sink.Stat, parent_dev: u64) void {
+        ctx.ensureSpace(io, name.len * 6 + 1000);
         ctx.write(if (stat.etype == .dir) ",\n[{\"name\":\"" else ",\n{\"name\":\"");
         ctx.writeStr(name);
         ctx.writeByte('"');
@@ -224,19 +222,19 @@ pub const Writer = struct {
 pub const Dir = struct {
     dev: u64,
 
-    pub fn addSpecial(_: *Dir, name: []const u8, sp: model.EType) void {
-        global.writer.writeSpecial(name, sp);
+    pub fn addSpecial(_: *Dir, io: std.Io, name: []const u8, sp: model.EType) void {
+        global.writer.writeSpecial(io, name, sp);
     }
 
-    pub fn addStat(_: *Dir, name: []const u8, stat: *const sink.Stat) void {
+    pub fn addStat(_: *Dir, io: std.Io, name: []const u8, stat: *const sink.Stat) void {
         global.writer.closeDirEntry(false);
-        global.writer.writeStat(name, stat, undefined);
+        global.writer.writeStat(io, name, stat, undefined);
         global.writer.writeByte('}');
     }
 
-    pub fn addDir(d: *Dir, name: []const u8, stat: *const sink.Stat) Dir {
+    pub fn addDir(d: *Dir, io: std.Io, name: []const u8, stat: *const sink.Stat) Dir {
         global.writer.closeDirEntry(false);
-        global.writer.writeStat(name, stat, d.dev);
+        global.writer.writeStat(io, name, stat, d.dev);
         global.writer.dir_entry_open = true;
         return .{ .dev = stat.dev };
     }
@@ -245,26 +243,26 @@ pub const Dir = struct {
         global.writer.closeDirEntry(true);
     }
 
-    pub fn final(_: *Dir) void {
-        global.writer.ensureSpace(1000);
+    pub fn final(_: *Dir, io: std.Io) void {
+        global.writer.ensureSpace(io, 1000);
         global.writer.closeDirEntry(false);
         global.writer.writeByte(']');
     }
 };
 
-pub fn createRoot(path: []const u8, stat: *const sink.Stat) Dir {
-    var root = Dir{.dev=0};
-    return root.addDir(path, stat);
+pub fn createRoot(io: std.Io, path: []const u8, stat: *const sink.Stat) Dir {
+    var root = Dir{ .dev = 0 };
+    return root.addDir(io, path, stat);
 }
 
-pub fn done() void {
+pub fn done(io: std.Io) void {
     global.writer.write("]\n");
-    global.writer.flush(0);
+    global.writer.flush(io, 0);
     if (global.writer.zstd) |z| z.destroy();
-    global.writer.fd.close();
+    global.writer.fd.close(io);
     main.allocator.destroy(global.writer);
 }
 
-pub fn setupOutput(out: std.fs.File) void {
-    global.writer = Writer.init(out);
+pub fn setupOutput(io: std.Io, out: std.Io.File) void {
+    global.writer = Writer.init(io, out);
 }

@@ -31,9 +31,9 @@ pub fn build(b: *std.Build) void {
         const fedora = "/usr/lib64/libncursesw.so.6";
         var manual_syslib: []const u8 = "";
 
-        if (std.fs.cwd().access(debian, .{}))
+        if (std.Io.Dir.cwd().access(b.graph.io, debian, .{}))
             manual_syslib = debian
-        else |_| if (std.fs.cwd().access(fedora, .{}))
+        else |_| if (std.Io.Dir.cwd().access(b.graph.io, fedora, .{}))
             manual_syslib = fedora
         else |_|
             manual_syslib = "";
@@ -46,6 +46,13 @@ pub fn build(b: *std.Build) void {
         }
     }
     main_mod.linkSystemLibrary("zstd", .{});
+
+    const translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    main_mod.addImport("c", translate_c.createModule());
 
     const exe = b.addExecutable(.{
         .name = "ncdu",

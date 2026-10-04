@@ -8,8 +8,7 @@ const util = @import("util.zig");
 const sink = @import("sink.zig");
 const ui = @import("ui.zig");
 const bin_export = @import("bin_export.zig");
-const c = @import("c.zig").c;
-
+const c = @import("c");
 
 const CborMajor = bin_export.CborMajor;
 const ItemKey = bin_export.ItemKey;
@@ -39,9 +38,9 @@ const ItemKey = bin_export.ItemKey;
 // This file only implements (2) at the moment.
 
 pub const global = struct {
-    var fd: std.fs.File = undefined;
+    var fd: std.Io.File = undefined;
     var index: []u8 = undefined;
-    var blocks: [8]Block = [1]Block{.{}}**8;
+    var blocks: [8]Block = @splat(.{});
     var counter: u64 = 0;
 
     // Last itemref being read/parsed. This is a hack to provide *some* context on error.
@@ -50,26 +49,31 @@ pub const global = struct {
     var lastitem: ?u64 = null;
 };
 
-
 const Block = struct {
     num: u32 = std.math.maxInt(u32),
     last: u64 = 0,
     data: []u8 = undefined,
 };
 
-
-inline fn bigu16(v: [2]u8) u16 { return std.mem.bigToNative(u16, @bitCast(v)); }
-inline fn bigu32(v: [4]u8) u32 { return std.mem.bigToNative(u32, @bitCast(v)); }
-inline fn bigu64(v: [8]u8) u64 { return std.mem.bigToNative(u64, @bitCast(v)); }
+inline fn bigu16(v: [2]u8) u16 {
+    return std.mem.bigToNative(u16, @bitCast(v));
+}
+inline fn bigu32(v: [4]u8) u32 {
+    return std.mem.bigToNative(u32, @bitCast(v));
+}
+inline fn bigu64(v: [8]u8) u64 {
+    return std.mem.bigToNative(u64, @bitCast(v));
+}
 
 fn die() noreturn {
     @branchHint(.cold);
-    if (global.lastitem) |e| ui.die("Error reading item {x} from file\n", .{e})
-    else ui.die("Error reading from file\n", .{});
+    if (global.lastitem) |e|
+        ui.die("Error reading item {x} from file\n", .{e})
+    else
+        ui.die("Error reading from file\n", .{});
 }
 
-
-fn readBlock(num: u32) []const u8 {
+fn readBlock(io: std.Io, num: u32) []const u8 {
     // Simple linear search, only suitable if we keep the number of in-memory blocks small.
     var block: *Block = &global.blocks[0];
     for (&global.blocks) |*b| {
@@ -88,8 +92,8 @@ fn readBlock(num: u32) []const u8 {
     global.counter += 1;
     block.last = global.counter;
 
-    if (num > global.index.len/8 - 1) die();
-    const offlen = bigu64(global.index[num*8..][0..8].*);
+    if (num > global.index.len / 8 - 1) die();
+    const offlen = bigu64(global.index[num * 8 ..][0..8].*);
     const off = offlen >> 24;
     const len = offlen & 0xffffff;
     if (len <= 12) die();
@@ -97,12 +101,12 @@ fn readBlock(num: u32) []const u8 {
     // Only read the compressed data part, assume block header, number and footer are correct.
     const buf = main.allocator.alloc(u8, @intCast(len - 12)) catch unreachable;
     defer main.allocator.free(buf);
-    const rdlen = global.fd.preadAll(buf, off + 8)
-        catch |e| ui.die("Error reading from file: {s}\n", .{ui.errorString(e)});
+    const rdlen = global.fd.readPositionalAll(io, buf, off + 8) catch |e|
+        ui.die("Error reading from file: {s}\n", .{ui.errorString(e)});
     if (rdlen != buf.len) die();
 
     const rawlen = c.ZSTD_getFrameContentSize(buf.ptr, buf.len);
-    if (rawlen <= 0 or rawlen >= (1<<24)) die();
+    if (rawlen <= 0 or rawlen >= (1 << 24)) die();
     block.data = main.allocator.alloc(u8, @intCast(rawlen)) catch unreachable;
 
     const res = c.ZSTD_decompress(block.data.ptr, block.data.len, buf.ptr, buf.len);
@@ -110,7 +114,6 @@ fn readBlock(num: u32) []const u8 {
 
     return block.data;
 }
-
 
 const CborReader = struct {
     buf: []const u8,
@@ -220,12 +223,12 @@ const CborVal = struct {
                 v.rd.buf = v.rd.buf[@intCast(v.arg)..];
             },
             .array => {
-                if (v.arg > (1<<24)) die();
+                if (v.arg > (1 << 24)) die();
                 for (0..@intCast(v.arg)) |_| v.rd.next().skip();
             },
             .map => {
-                if (v.arg > (1<<24)) die();
-                for (0..@intCast(v.arg*|2)) |_| v.rd.next().skip();
+                if (v.arg > (1 << 24)) die();
+                for (0..@intCast(v.arg *| 2)) |_| v.rd.next().skip();
             },
             else => {},
         }
@@ -233,8 +236,10 @@ const CborVal = struct {
 
     fn etype(v: *const CborVal) model.EType {
         const n = v.int(i32);
-        return std.meta.intToEnum(model.EType, n)
-            catch if (n < 0) .pattern else .nonreg;
+        return if (std.enums.fromInt(model.EType, n)) |i| i else if (n < 0)
+            .pattern
+        else
+            .nonreg;
     }
 
     fn itemref(v: *const CborVal, cur: u64) u64 {
@@ -246,7 +251,6 @@ const CborVal = struct {
         return die();
     }
 };
-
 
 test "CBOR int parsing" {
     inline for (.{
@@ -267,14 +271,14 @@ test "CBOR int parsing" {
         .{ .in = "\x3b\x7f\xff\xff\xff\xff\xff\xff\xff", .t = i64, .exp = std.math.minInt(i64) },
         .{ .in = "\x3b\xff\xff\xff\xff\xff\xff\xff\xff", .t = i65, .exp = std.math.minInt(i65) },
     }) |t| {
-        var r = CborReader{.buf = t.in};
+        var r = CborReader{ .buf = t.in };
         try std.testing.expectEqual(@as(t.t, t.exp), r.next().int(t.t));
         try std.testing.expectEqual(0, r.buf.len);
     }
 }
 
 test "CBOR string parsing" {
-    var r = CborReader{.buf="\x40"};
+    var r = CborReader{ .buf = "\x40" };
     try std.testing.expectEqualStrings("", r.next().bytes());
     r.buf = "\x45\x00\x01\x02\x03\x04x";
     try std.testing.expectEqualStrings("\x00\x01\x02\x03\x04", r.next().bytes());
@@ -301,7 +305,7 @@ test "CBOR skip parsing" {
         "\xbf\xff",
         "\xbf\xc0\x00\x9f\xff\xff",
     }) |s| {
-        var r = CborReader{.buf = s ++ "garbage"};
+        var r = CborReader{ .buf = s ++ "garbage" };
         r.next().skip();
         try std.testing.expectEqualStrings(r.buf, "garbage");
     }
@@ -317,7 +321,7 @@ const ItemParser = struct {
     };
 
     fn init(buf: []const u8) ItemParser {
-        var r = ItemParser{.r = .{.buf = buf}};
+        var r = ItemParser{ .r = .{ .buf = buf } };
         const head = r.r.next();
         if (head.major != .map) die();
         if (!head.indef) r.len = head.arg;
@@ -351,10 +355,10 @@ const ItemParser = struct {
 };
 
 // Returned buffer is valid until the next readItem().
-fn readItem(ref: u64) ItemParser {
+fn readItem(io: std.Io, ref: u64) ItemParser {
     global.lastitem = ref;
     if (ref >= (1 << (24 + 32))) die();
-    const block = readBlock(@intCast(ref >> 24));
+    const block = readBlock(io, @intCast(ref >> 24));
     if ((ref & 0xffffff) >= block.len) die();
     return ItemParser.init(block[@intCast(ref & 0xffffff)..]);
 }
@@ -372,8 +376,8 @@ const Import = struct {
         sub: ?u64 = null,
     };
 
-    fn readFields(ctx: *Import, ref: u64) void {
-        ctx.p = readItem(ref);
+    fn readFields(ctx: *Import, io: std.Io, ref: u64) void {
+        ctx.p = readItem(io, ref);
         var hastype = false;
 
         while (ctx.p.next()) |kv| switch (kv.key) {
@@ -384,16 +388,28 @@ const Import = struct {
             .name => ctx.fields.name = kv.val.bytes(),
             .prev => ctx.fields.prev = kv.val.itemref(ref),
             .asize => ctx.stat.size = kv.val.int(u64),
-            .dsize => ctx.stat.blocks = @intCast(kv.val.int(u64)/512),
+            .dsize => ctx.stat.blocks = @intCast(kv.val.int(u64) / 512),
             .dev => ctx.stat.dev = kv.val.int(u64),
             .rderr => ctx.fields.rderr = kv.val.isTrue(),
             .sub => ctx.fields.sub = kv.val.itemref(ref),
             .ino => ctx.stat.ino = kv.val.int(u64),
             .nlink => ctx.stat.nlink = kv.val.int(u31),
-            .uid => { ctx.stat.ext.uid = kv.val.int(u32); ctx.stat.ext.pack.hasuid = true; },
-            .gid => { ctx.stat.ext.gid = kv.val.int(u32); ctx.stat.ext.pack.hasgid = true; },
-            .mode => { ctx.stat.ext.mode = kv.val.int(u16); ctx.stat.ext.pack.hasmode = true; },
-            .mtime => { ctx.stat.ext.mtime = kv.val.int(u64); ctx.stat.ext.pack.hasmtime = true; },
+            .uid => {
+                ctx.stat.ext.uid = kv.val.int(u32);
+                ctx.stat.ext.pack.hasuid = true;
+            },
+            .gid => {
+                ctx.stat.ext.gid = kv.val.int(u32);
+                ctx.stat.ext.pack.hasgid = true;
+            },
+            .mode => {
+                ctx.stat.ext.mode = kv.val.int(u16);
+                ctx.stat.ext.pack.hasmode = true;
+            },
+            .mtime => {
+                ctx.stat.ext.mtime = kv.val.int(u64);
+                ctx.stat.ext.pack.hasmtime = true;
+            },
             else => kv.val.skip(),
         };
 
@@ -401,43 +417,44 @@ const Import = struct {
         if (ctx.fields.name.len == 0) die();
     }
 
-    fn import(ctx: *Import, ref: u64, parent: ?*sink.Dir, dev: u64) void {
+    fn import(ctx: *Import, io: std.Io, ref: u64, parent: ?*sink.Dir, dev: u64) void {
         ctx.stat = .{ .dev = dev };
         ctx.fields = .{};
-        ctx.readFields(ref);
+        ctx.readFields(io, ref);
 
         if (ctx.stat.etype == .dir) {
             const prev = ctx.fields.prev;
             const dir =
-                if (parent) |d| d.addDir(ctx.sink, ctx.fields.name, &ctx.stat)
-                else sink.createRoot(ctx.fields.name, &ctx.stat);
-            ctx.sink.setDir(dir);
-            if (ctx.fields.rderr) dir.setReadError(ctx.sink);
+                if (parent) |d|
+                    d.addDir(io, ctx.sink, ctx.fields.name, &ctx.stat)
+                else
+                    sink.createRoot(io, ctx.fields.name, &ctx.stat);
+            ctx.sink.setDir(io, dir);
+            if (ctx.fields.rderr) dir.setReadError(io, ctx.sink);
 
             ctx.fields.prev = ctx.fields.sub;
-            while (ctx.fields.prev) |n| ctx.import(n, dir, ctx.stat.dev);
+            while (ctx.fields.prev) |n| ctx.import(io, n, dir, ctx.stat.dev);
 
-            ctx.sink.setDir(parent);
-            dir.unref(ctx.sink);
+            ctx.sink.setDir(io, parent);
+            dir.unref(io, ctx.sink);
             ctx.fields.prev = prev;
-
         } else {
             const p = parent orelse die();
             if (@intFromEnum(ctx.stat.etype) < 0)
-                p.addSpecial(ctx.sink, ctx.fields.name, ctx.stat.etype)
+                p.addSpecial(io, ctx.sink, ctx.fields.name, ctx.stat.etype)
             else
-                p.addStat(ctx.sink, ctx.fields.name, &ctx.stat);
+                p.addStat(io, ctx.sink, ctx.fields.name, &ctx.stat);
         }
 
         if ((ctx.sink.files_seen.load(.monotonic) & 65) == 0)
-            main.handleEvent(false, false);
+            main.handleEvent(io, false, false);
     }
 };
 
 // Resolve an itemref and return a newly allocated entry.
 // Dir.parent and Link.next/prev are left uninitialized.
-pub fn get(ref: u64, alloc: std.mem.Allocator) *model.Entry {
-    const parser = readItem(ref);
+pub fn get(io: std.Io, ref: u64, alloc: std.mem.Allocator) *model.Entry {
+    const parser = readItem(io, ref);
 
     var etype: ?model.EType = null;
     var name: []const u8 = "";
@@ -447,75 +464,108 @@ pub fn get(ref: u64, alloc: std.mem.Allocator) *model.Entry {
         switch (kv.key) {
             .type => etype = kv.val.etype(),
             .name => name = kv.val.bytes(),
-            .uid   => { ext.uid = kv.val.int(u32); ext.pack.hasuid = true; },
-            .gid   => { ext.gid = kv.val.int(u32); ext.pack.hasgid = true; },
-            .mode  => { ext.mode = kv.val.int(u16); ext.pack.hasmode = true; },
-            .mtime => { ext.mtime = kv.val.int(u64); ext.pack.hasmtime = true; },
+            .uid => {
+                ext.uid = kv.val.int(u32);
+                ext.pack.hasuid = true;
+            },
+            .gid => {
+                ext.gid = kv.val.int(u32);
+                ext.pack.hasgid = true;
+            },
+            .mode => {
+                ext.mode = kv.val.int(u16);
+                ext.pack.hasmode = true;
+            },
+            .mtime => {
+                ext.mtime = kv.val.int(u64);
+                ext.pack.hasmtime = true;
+            },
             else => kv.val.skip(),
         }
     }
     if (etype == null or name.len == 0) die();
 
-    var entry = model.Entry.create(alloc, etype.?, main.config.extended and !ext.isEmpty(), name);
+    var entry = model.Entry.create(alloc, io, etype.?, main.config.extended and !ext.isEmpty(), name);
     entry.next = .{ .ref = std.math.maxInt(u64) };
     if (entry.ext()) |e| e.* = ext;
     if (entry.dir()) |d| d.sub = .{ .ref = std.math.maxInt(u64) };
     p = parser;
     while (p.next()) |kv| switch (kv.key) {
-        .prev  => entry.next = .{ .ref = kv.val.itemref(ref) },
-        .asize => { if (entry.pack.etype != .dir) entry.size = kv.val.int(u64); },
-        .dsize => { if (entry.pack.etype != .dir) entry.pack.blocks = @intCast(kv.val.int(u64)/512); },
+        .prev => entry.next = .{ .ref = kv.val.itemref(ref) },
+        .asize => {
+            if (entry.pack.etype != .dir) entry.size = kv.val.int(u64);
+        },
+        .dsize => {
+            if (entry.pack.etype != .dir) entry.pack.blocks = @intCast(kv.val.int(u64) / 512);
+        },
 
-        .rderr => { if (entry.dir()) |d| {
-            if (kv.val.isTrue()) d.pack.err = true
-            else d.pack.suberr = true;
-        } },
-        .dev      => { if (entry.dir()) |d| d.pack.dev = model.devices.getId(kv.val.int(u64)); },
+        .rderr => {
+            if (entry.dir()) |d| {
+                if (kv.val.isTrue())
+                    d.pack.err = true
+                else
+                    d.pack.suberr = true;
+            }
+        },
+        .dev => {
+            if (entry.dir()) |d| d.pack.dev = model.devices.getId(io, kv.val.int(u64));
+        },
         .cumasize => entry.size = kv.val.int(u64),
-        .cumdsize => entry.pack.blocks = @intCast(kv.val.int(u64)/512),
-        .shrasize => { if (entry.dir()) |d| d.shared_size = kv.val.int(u64); },
-        .shrdsize => { if (entry.dir()) |d| d.shared_blocks = kv.val.int(u64)/512; },
-        .items    => { if (entry.dir()) |d| d.items = util.castClamp(u32, kv.val.int(u64)); },
-        .sub      => { if (entry.dir()) |d| d.sub = .{ .ref = kv.val.itemref(ref) }; },
+        .cumdsize => entry.pack.blocks = @intCast(kv.val.int(u64) / 512),
+        .shrasize => {
+            if (entry.dir()) |d| d.shared_size = kv.val.int(u64);
+        },
+        .shrdsize => {
+            if (entry.dir()) |d| d.shared_blocks = kv.val.int(u64) / 512;
+        },
+        .items => {
+            if (entry.dir()) |d| d.items = util.castClamp(u32, kv.val.int(u64));
+        },
+        .sub => {
+            if (entry.dir()) |d| d.sub = .{ .ref = kv.val.itemref(ref) };
+        },
 
-        .ino   => { if (entry.link()) |l| l.ino = kv.val.int(u64); },
-        .nlink => { if (entry.link()) |l| l.pack.nlink = kv.val.int(u31); },
+        .ino => {
+            if (entry.link()) |l| l.ino = kv.val.int(u64);
+        },
+        .nlink => {
+            if (entry.link()) |l| l.pack.nlink = kv.val.int(u31);
+        },
         else => kv.val.skip(),
     };
     return entry;
 }
 
 pub fn getRoot() u64 {
-    return bigu64(global.index[global.index.len-8..][0..8].*);
+    return bigu64(global.index[global.index.len - 8 ..][0..8].*);
 }
 
 // Walk through the directory tree in depth-first order and pass results to sink.zig.
 // Depth-first is required for JSON export, but more efficient strategies are
 // possible for other sinks. Parallel import is also an option, but that's more
 // complex and likely less efficient than a streaming import.
-pub fn import() void {
+pub fn import(io: std.Io) void {
     const sink_threads = sink.createThreads(1);
-    var ctx = Import{.sink = &sink_threads[0]};
-    ctx.import(getRoot(), null, 0);
-    sink.done();
+    var ctx = Import{ .sink = &sink_threads[0] };
+    ctx.import(io, getRoot(), null, 0);
+    sink.done(io);
 }
 
 // Assumes that the file signature has already been read and validated.
-pub fn open(fd: std.fs.File) !void {
+pub fn open(io: std.Io, fd: std.Io.File) !void {
     global.fd = fd;
 
-    // Do not use fd.getEndPos() because that requires newer kernels supporting statx() #261.
-    try fd.seekFromEnd(0);
-    const size = try fd.getPos();
+    var fd_buf: [16]u8 = undefined;
+    const size = try fd.readPositionalAll(io, &fd_buf, 0);
     if (size < 16) return error.EndOfStream;
 
     // Read index block
     var buf: [4]u8 = undefined;
-    if (try fd.preadAll(&buf, size - 4) != 4) return error.EndOfStream;
+    if (try fd.readPositionalAll(io, &buf, size - 4) != 4) return error.EndOfStream;
     const index_header = bigu32(buf);
     if ((index_header >> 28) != 1 or (index_header & 7) != 0) die();
     const len = (index_header & 0x0fffffff) - 8; // excluding block header & footer
     if (len >= size) die();
     global.index = main.allocator.alloc(u8, len) catch unreachable;
-    if (try fd.preadAll(global.index, size - len - 4) != global.index.len) return error.EndOfStream;
+    if (try fd.readPositionalAll(io, global.index, size - len - 4) != global.index.len) return error.EndOfStream;
 }
