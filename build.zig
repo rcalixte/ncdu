@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
     if (host_os == .macos)
         main_mod.linkSystemLibrary("ncursesw", .{})
     else if (host_os == .freebsd) {
-        main_mod.addObjectFile(.{ .cwd_relative = "/usr/lib/libncursesw.so.9" });
+        main_mod.addObjectFile(.{ .cwd_relative = "/usr/lib/libncursesw.so" });
         main_mod.linkSystemLibrary("tinfow", .{});
     } else if (host_os == .linux) {
         // some distros don't have an ELF system library for ncurses, so we have to link to it manually
@@ -53,6 +53,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     main_mod.addImport("c", translate_c.createModule());
+
+    if (host_os == .macos)
+        translate_c.addIncludePath(.{.cwd_relative = "/opt/homebrew/include"});
 
     const exe = b.addExecutable(.{
         .name = "ncdu",

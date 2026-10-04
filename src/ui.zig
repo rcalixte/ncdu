@@ -374,7 +374,7 @@ pub fn init() void {
     if (main.config.nc_tty) {
         const tty = std.c.fopen("/dev/tty", "r+");
         if (tty == null) die("Error opening /dev/tty: {t}.\n", .{std.posix.errno(-1)});
-        const term = c.newterm(null, @ptrCast(tty), @ptrCast(tty));
+        const term = c.newterm(null, @ptrCast(@alignCast(tty)), @ptrCast(@alignCast(tty)));
         if (term == null) die("Error initializing ncurses.\n", .{});
         _ = c.set_term(term);
     } else {
