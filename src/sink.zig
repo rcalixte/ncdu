@@ -159,19 +159,23 @@ pub const Dir = struct {
         _ = d.refcnt.fetchAdd(1, .monotonic);
     }
 
-    pub fn unref(d: *Dir, io: std.Io, t: *Thread) void {
-        if (d.refcnt.fetchSub(1, .release) != 1) return;
-        _ = d.refcnt.load(.acquire);
+    pub fn unref(dir: *Dir, io: std.Io, t: *Thread) void {
+        var d = dir;
+        while (true) {
+            if (d.refcnt.fetchSub(1, .release) != 1) return;
+            _ = d.refcnt.load(.acquire);
 
-        switch (d.out) {
-            .mem => |*m| m.final(io, if (d.parent) |p| &p.out.mem else null),
-            .json => |*j| j.final(io),
-            .bin => |*b| b.final(io, &t.sink.bin, d.name, if (d.parent) |p| &p.out.bin else null),
+            switch (d.out) {
+                .mem => |*m| m.final(io, if (d.parent) |p| &p.out.mem else null),
+                .json => |*j| j.final(io),
+                .bin => |*b| b.final(io, &t.sink.bin, d.name, if (d.parent) |p| &p.out.bin else null),
+            }
+
+            const parent = d.parent;
+            if (d.name.len > 0) main.allocator.free(d.name);
+            main.allocator.destroy(d);
+            d = parent orelse return;
         }
-
-        if (d.parent) |p| p.unref(io, t);
-        if (d.name.len > 0) main.allocator.free(d.name);
-        main.allocator.destroy(d);
     }
 };
 
