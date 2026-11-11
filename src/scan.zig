@@ -301,7 +301,7 @@ const Thread = struct {
                 if (t.thread_num == 0) main.handleEvent(io, false, false);
 
                 const entry = d.it.next(io) catch blk: {
-                    dir.sink.setReadError(io, t.sink);
+                    d.sink.setReadError(io, t.sink);
                     break :blk null;
                 };
                 if (entry) |e|
